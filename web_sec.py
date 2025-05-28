@@ -2,6 +2,7 @@ import argparse
 import sys
 import subprocess
 import re
+import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
@@ -10,12 +11,10 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
-from colorama import Fore, init
-import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 ALLOWED_CHECKS = {"ssl", "headers", "dns", "nmap", "cookies"}
-init(autoreset=True)
-
 
 def enforce_scheme(url, default_scheme="https"):
     if not url.startswith("http"):
@@ -117,7 +116,7 @@ def run_cookies_check(target, max_pages=20):
         if driver:
             driver.quit()
 
-    output_lines.append("\n==================== Cookie Summary ====================")
+    output_lines.append("\n====================== Cookie Summary ======================")
     if not all_cookies:
         output_lines.append("No cookies found.\n")
     else:
@@ -136,8 +135,8 @@ def run_cookies_check(target, max_pages=20):
         output_lines.append("========================================================")
 
     print(f"[*] Finished cookie check on {target}")
-    return "\n".join(output_lines)
-
+    
+    return "\n".join(output_lines) + "\n"
 
 def validate_choices(value, allowed_set, arg_name):
     values = [v.strip() for v in value.split(',')]
@@ -193,7 +192,7 @@ def run_ssl_check(target):
     print(f"[*] Running SSL check on {target}")
 
 def run_headers_check(target):
-    print(f"[*] Running headers check on {target}")
+    print(f"[*] Starting headers check on {target}")
     output_lines = [f"[*] HTTP Security Headers Report for: {target}"]
 
     SECURITY_HEADERS = [
@@ -205,65 +204,91 @@ def run_headers_check(target):
         "Permissions-Policy",
     ]
 
+    INTERESTING_HEADERS = [
+        "X-Powered-By",
+        "Server",
+        "Content-Security-Policy",  # for deeper inspection
+    ]
+
     http_to_https = False
 
     try:
         parsed = urlparse(target)
-        scheme = parsed.scheme if parsed.scheme else "http"
-        base_url = f"{scheme}://{parsed.netloc or parsed.path}"
+        domain = parsed.netloc or parsed.path
+        https_url = f"https://{domain}"
+        http_url = f"http://{domain}"
 
-        response = requests.get(base_url, allow_redirects=True, timeout=10)
-        final_url = response.url
+        # Check HTTP to HTTPS redirection
+        try:
+            http_response = requests.get(http_url, allow_redirects=True, timeout=10)
+            if http_response.url.startswith("https://"):
+                http_to_https = True
+                output_lines.append(f"[!] Detected HTTP → HTTPS redirect: {http_url} → {http_response.url}")
+        except requests.exceptions.RequestException:
+            pass
 
-        if base_url.startswith("http://") and final_url.startswith("https://"):
-            http_to_https = True
-            output_lines.append(Fore.YELLOW + f"[!] Detected HTTP → HTTPS redirect: {base_url} → {final_url}")
-
+        # Main HTTPS request
+        response = requests.get(https_url, timeout=10)
         headers = response.headers
 
-        output_lines.append("\n=== Security Headers ===")
+        output_lines.append("\n====================== Security Headers ====================")
         for header in SECURITY_HEADERS:
             if header in headers:
-                output_lines.append(Fore.GREEN + f"[+] {header}: {headers[header]}")
+                output_lines.append(f"[+] {header}: {headers[header]}")
             else:
-                output_lines.append(Fore.RED + f"[!] Missing header: {header}")
+                output_lines.append(f"[!] Missing header: {header}")
 
-        output_lines.append("\n=== Full Response Headers ===")
+        output_lines.append("\n=================== Full Response Headers ==================")
         for k, v in headers.items():
             output_lines.append(f"{k}: {v}")
 
-        output_lines.append("\n===       EXTRA INFO      ===")
+        output_lines.append("\n=================== Extra Interesting Info =================")
         if http_to_https:
-            output_lines.append(Fore.GREEN + "[+] HTTP redirects to HTTPS — good security practice.")
+            output_lines.append("[+] HTTP redirects to HTTPS — good security practice.")
         else:
-            output_lines.append(Fore.RED + "[!] HTTP does NOT redirect to HTTPS — consider enforcing HTTPS.")
+            output_lines.append("[!] HTTP does NOT redirect to HTTPS — consider enforcing HTTPS.")
+
+        for header in INTERESTING_HEADERS:
+            if header in headers:
+                output_lines.append(f"[~] {header}: {headers[header]}")
+
+                # Special CSP inspection
+                if header.lower() == "content-security-policy":
+                    csp_value = headers[header]
+                    output_lines.append("    [•] Analyzing CSP...")
+
+                    if "'unsafe-inline'" in csp_value:
+                        output_lines.append("    [!] CSP uses 'unsafe-inline' — allows inline scripts, not recommended.")
+                    if "'unsafe-eval'" in csp_value:
+                        output_lines.append("    [!] CSP uses 'unsafe-eval' — allows eval(), dangerous for XSS.")
+                    if "*" in csp_value:
+                        output_lines.append("    [!] CSP uses wildcards (*) — too permissive, restrict to trusted sources.")
+                    if "default-src" not in csp_value:
+                        output_lines.append("    [!] CSP missing 'default-src' — baseline fallback not defined.")
+                    if "script-src *" in csp_value:
+                        output_lines.append("    [!] 'script-src *' allows scripts from anywhere — reduce scope if possible.")
 
     except requests.exceptions.RequestException as e:
-        output_lines.append(Fore.RED + f"[!] Error fetching headers: {e}")
+        output_lines.append(f"[!] Error fetching headers: {e}")
 
-    return "\n".join(output_lines)
+    print(f"[*] Finished headers check on {target}")
+    return "\n".join(output_lines) + "\n"
+
 
 def run_dns_check(target):
     print(f"[*] Running DNS check on {target}")
 
-
 def run_nmap_check(target, safe_mode=False):
     parsed = urlparse(target)
     host = parsed.netloc if parsed.netloc else parsed.path
+    print(f"[*] Starting nmap check on {host}")
     output_lines = []
-
-    print(f"[*] Running Nmap check on {host}")
-
     # Nmap command arguments
     if safe_mode:
         args = ['nmap', '-sS', '-p-', '-Pn', host]
     else:
-        args = ['nmap', '-sC', '-sV', host]
-
-    output_lines.append("---------------------------------------------")
-    output_lines.append("|                     NMAP                  |")
-    output_lines.append("---------------------------------------------")
-
+        #args = ['nmap', '-sC', '-sV', host]
+        args = ['nmap',host]
     try:
         result = subprocess.run(args, capture_output=True, text=True, check=True)
         output = result.stdout
@@ -286,7 +311,6 @@ def run_nmap_check(target, safe_mode=False):
         if rdns:
             output_lines.append(f"  Reverse DNS: {rdns}")
 
-        # Parse ports and script output
         port_section = False
         ports = []
         current_port_info = None
@@ -342,9 +366,7 @@ def run_nmap_check(target, safe_mode=False):
     except FileNotFoundError:
         output_lines.append("[!] Nmap command not found. Please install nmap and ensure it's in your PATH.")
 
-    print("\n".join(output_lines))
-    print(f"[*] Finished Nmap check on {host}")
-    output_lines.append("---------------------------------------------")
+    print(f"[*] Finished cookie check on {host}")
     return "\n".join(output_lines)
 
 
@@ -353,7 +375,6 @@ def main():
     checks_to_run = args.checks
 
     outputs = []
-    from datetime import datetime
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     outputs.append(f"Web Security Scan Report\nTarget: {args.target}\nDate: {timestamp}\n")
 
@@ -365,22 +386,41 @@ def main():
         "cookies": lambda: run_cookies_check(args.target),
     }
 
+    threaded_checks = {"headers", "nmap", "cookies"}
+    futures = {}
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        for check in checks_to_run:
+            if check in threaded_checks:
+                futures[executor.submit(check_dispatch[check])] = check
+
+        for future in as_completed(futures):
+            check = futures[future]
+            outputs.append("=" * 60)
+            outputs.append(f"{check.upper()} CHECK")
+            outputs.append("=" * 60)
+            try:
+                result = future.result()
+                outputs.append(result)
+            except Exception as e:
+                outputs.append(f"[!] Error during {check} check: {e}")
+
+    # Run non-threaded checks serially
     for check in checks_to_run:
-        outputs.append("="*60)
-        outputs.append(f"{check.upper()} CHECK")
-        outputs.append("="*60)
-        if check in check_dispatch:
+        if check not in threaded_checks and check in check_dispatch:
+            outputs.append("=" * 60)
+            outputs.append(f"{check.upper()} CHECK")
+            outputs.append("=" * 60)
             result = check_dispatch[check]()
             outputs.append(result)
-        else:
-            outputs.append(f"Unknown check: {check}")
 
-    report = "\n".join(outputs)
+    report = "\n".join(outputs) + "\n"
 
     with open("scan_report.txt", "w", encoding="utf-8") as f:
         f.write(report)
 
     print("Scan complete. Results saved to scan_report.txt")
+
 
 if __name__ == "__main__":
     main()
