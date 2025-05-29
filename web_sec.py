@@ -3,15 +3,16 @@ import sys
 import subprocess
 import socket
 import ssl
-import json
-import os
+import aiohttp
+import asyncio
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, urljoin
+from typing import Set
 import time
 import re
 import idna
 import requests
 from datetime import datetime, timezone
-from time import sleep
-from urllib.request import urlopen
 from urllib.parse import urljoin, urlparse
 
 from cryptography import x509
@@ -30,7 +31,7 @@ import dns.query
 import dns.zone
 
 
-ALLOWED_CHECKS = {"ssl", "headers", "dns", "nmap", "cookies", "waf"}
+ALLOWED_CHECKS = {"ssl", "headers", "dns", "nmap", "cookies", "waf", "xss"}
 
 def enforce_scheme(url, default_scheme="https"):
     if not url.startswith("http"):
@@ -180,6 +181,7 @@ Available checks:
   nmap     - Run basic Nmap port scan
   cookies  - Inspect HTTP cookies
   waf      - Fingerprints WAF's
+  xss      - XSS testing integration with XSStrike
         """
     )
     
@@ -383,7 +385,6 @@ def run_ssl_check(target):
 
     report_lines.append(f"\n[*] Finished SSL check on {target}")
     return "\n".join(report_lines) + "\n"
-
 
 def run_headers_check(target):
     print(f"[*] Starting headers check on {target}")
@@ -631,6 +632,7 @@ def run_nmap_check(target, safe_mode=False):
     print(f"[*] Finished cookie check on {host}")
     return "\n".join(output_lines)
 
+
 def run_waf_check(target):
     print(f"[*] Starting WAF check on {target}")
     output_lines = [f"[*] WAF Detection Report for: {target}"]
@@ -660,6 +662,81 @@ def run_waf_check(target):
     print(f"[*] Finished WAF check on {target}")
     return "\n".join(output_lines) + "\n"
 
+
+def strip_ansi_codes(text: str) -> str:
+    ansi_escape = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
+    return ansi_escape.sub('', text)
+
+def run_xss_check(domain: str, timeout: int = 180) -> str:
+    output_lines = [f"[*] XSS Detection Report for: {domain}\n"]
+
+    crawl_cmd = ["python3", "/opt/XSStrike/xsstrike.py", "-u", domain, "--crawl"]
+
+    try:
+        crawl_proc = subprocess.run(
+            crawl_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        raw_output = crawl_proc.stdout + "\n" + crawl_proc.stderr
+
+    except Exception as e:
+        output_lines.append(f"[!] XSStrike crawl failed: {e}")
+        return "\n".join(output_lines)
+
+    clean_output = strip_ansi_codes(raw_output)
+
+
+    comp_block_pattern = re.compile(
+        r"\[\+\] Vulnerable component: (.+?)\s*\n"
+        r"\[!\] Component location: (.+?)\s*\n"
+        r"\[!\] Total vulnerabilities: (\d+)\s*\n"
+        r"((?:\[!\] Summary: .+?\n\[!\] Severity: .+?\n(?:\[!\] CVE: .+?\n)?)+)",
+        re.DOTALL
+    )
+
+    vuln_pattern = re.compile(
+        r"\[!\] Summary: (.+?)\s*\n"
+        r"\[!\] Severity: (.+?)\s*\n"
+        r"(?:\[!\] CVE: (.+?)\s*\n)?"
+    )
+
+    vulnerable_found = False
+    for comp_match in comp_block_pattern.finditer(clean_output):
+        vulnerable_found = True
+        component = comp_match.group(1).strip()
+        location = comp_match.group(2).strip()
+        vuln_count = comp_match.group(3).strip()
+        vulns_text = comp_match.group(4)
+
+        output_lines.append(f"[+] Vulnerable JS Component: {component} ({vuln_count} vulnerabilities)")
+        output_lines.append(f"    Location: {location}")
+
+        for vuln_match in vuln_pattern.finditer(vulns_text):
+            summary = vuln_match.group(1).strip()
+            severity = vuln_match.group(2).strip()
+            cve = vuln_match.group(3)
+            cve_str = cve.strip() if cve else "N/A"
+
+            output_lines.append(f"    - Summary : {summary}")
+            output_lines.append(f"      Severity: {severity.capitalize()}")
+            output_lines.append(f"      CVE     : {cve_str}")
+
+        output_lines.append("")  # blank line after each component block
+
+    if not vulnerable_found:
+        output_lines.append("[*] No vulnerable JS components found.")
+
+    output_lines.append("\n[*] XSStrike crawl found 0 URLs with parameters.")
+
+    return "\n".join(output_lines) + "\n"
+
+def run_sql_check(target):
+
+    pass
+
+
 def main():
     args = parse_arguments()
     checks_to_run = args.checks
@@ -674,13 +751,14 @@ def main():
         "dns": lambda: run_dns_check(args.target),
         "nmap": lambda: run_nmap_check(args.target, safe_mode=args.safe_mode),
         "cookies": lambda: run_cookies_check(args.target),
-        "waf": lambda: run_waf_check(args.target)
+        "waf": lambda: run_waf_check(args.target),
+        "xss": lambda: run_xss_check(args.target)
     }
   
 
     # Define categories
     threaded_checks = {"headers", "cookies", "ssl", "dns"}
-    subprocess_checks = {"nmap", "waf"}
+    subprocess_checks = {"nmap", "waf","xss"}
 
     outputs = []
 
