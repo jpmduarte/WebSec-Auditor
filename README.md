@@ -25,7 +25,7 @@ WebSec Auditor is an all-in-one Python-based tool that automates **web security 
 - Detects HTTP to HTTPS redirection
 - Analyzes CSP for risky directives like `'unsafe-inline'`, `*`, etc.
 
-### 🍪 Cookie Scanner *(coming soon)*
+### 🍪 Cookie Scanner 
 - Checks for:
   - Missing `HttpOnly`, `Secure`, and `SameSite` flags
   - Potential cross-domain access vulnerabilities
