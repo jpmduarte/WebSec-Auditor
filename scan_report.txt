@@ -1,187 +1,30 @@
 Web Security Scan Report
-Target: google.com
-Date: 2025-05-28 18:25:57
+Target: https://www.vilartex.pt
+Date: 2025-05-28 21:21:51
 
 ============================================================
-SSL CHECK
+HEADERS CHECK
 ============================================================
-[*] SSL Certificate Report for: google.com
-Issued to       : *.google.com ()
-Issued by       : WR2 (Google Trust Services)
-Server IP       : 142.250.185.14
-Valid from      : 2025-04-29
-Valid to        : 2025-07-22 (55 days left)
-Expired         : No
-Serial Number   : 33499888410300705391682813552886650448
-Signature Algo  : SHA256
-Subject Alt Names:
-  - *.google.com
-  - *.appengine.google.com
-  - *.bdn.dev
-  - *.origin-test.bdn.dev
-  - *.cloud.google.com
-  - *.crowdsource.google.com
-  - *.datacompute.google.com
-  - *.google.ca
-  - *.google.cl
-  - *.google.co.in
-  - *.google.co.jp
-  - *.google.co.uk
-  - *.google.com.ar
-  - *.google.com.au
-  - *.google.com.br
-  - *.google.com.co
-  - *.google.com.mx
-  - *.google.com.tr
-  - *.google.com.vn
-  - *.google.de
-  - *.google.es
-  - *.google.fr
-  - *.google.hu
-  - *.google.it
-  - *.google.nl
-  - *.google.pl
-  - *.google.pt
-  - *.googleapis.cn
-  - *.googlevideo.com
-  - *.gstatic.cn
-  - *.gstatic-cn.com
-  - googlecnapps.cn
-  - *.googlecnapps.cn
-  - googleapps-cn.com
-  - *.googleapps-cn.com
-  - gkecnapps.cn
-  - *.gkecnapps.cn
-  - googledownloads.cn
-  - *.googledownloads.cn
-  - recaptcha.net.cn
-  - *.recaptcha.net.cn
-  - recaptcha-cn.net
-  - *.recaptcha-cn.net
-  - widevine.cn
-  - *.widevine.cn
-  - ampproject.org.cn
-  - *.ampproject.org.cn
-  - ampproject.net.cn
-  - *.ampproject.net.cn
-  - google-analytics-cn.com
-  - *.google-analytics-cn.com
-  - googleadservices-cn.com
-  - *.googleadservices-cn.com
-  - googlevads-cn.com
-  - *.googlevads-cn.com
-  - googleapis-cn.com
-  - *.googleapis-cn.com
-  - googleoptimize-cn.com
-  - *.googleoptimize-cn.com
-  - doubleclick-cn.net
-  - *.doubleclick-cn.net
-  - *.fls.doubleclick-cn.net
-  - *.g.doubleclick-cn.net
-  - doubleclick.cn
-  - *.doubleclick.cn
-  - *.fls.doubleclick.cn
-  - *.g.doubleclick.cn
-  - dartsearch-cn.net
-  - *.dartsearch-cn.net
-  - googletraveladservices-cn.com
-  - *.googletraveladservices-cn.com
-  - googletagservices-cn.com
-  - *.googletagservices-cn.com
-  - googletagmanager-cn.com
-  - *.googletagmanager-cn.com
-  - googlesyndication-cn.com
-  - *.googlesyndication-cn.com
-  - *.safeframe.googlesyndication-cn.com
-  - app-measurement-cn.com
-  - *.app-measurement-cn.com
-  - gvt1-cn.com
-  - *.gvt1-cn.com
-  - gvt2-cn.com
-  - *.gvt2-cn.com
-  - 2mdn-cn.net
-  - *.2mdn-cn.net
-  - googleflights-cn.net
-  - *.googleflights-cn.net
-  - admob-cn.com
-  - *.admob-cn.com
-  - googlesandbox-cn.com
-  - *.googlesandbox-cn.com
-  - *.safenup.googlesandbox-cn.com
-  - *.gstatic.com
-  - *.metric.gstatic.com
-  - *.gvt1.com
-  - *.gcpcdn.gvt1.com
-  - *.gvt2.com
-  - *.gcp.gvt2.com
-  - *.url.google.com
-  - *.youtube-nocookie.com
-  - *.ytimg.com
-  - ai.android
-  - android.com
-  - *.android.com
-  - *.flash.android.com
-  - g.cn
-  - *.g.cn
-  - g.co
-  - *.g.co
-  - goo.gl
-  - www.goo.gl
-  - google-analytics.com
-  - *.google-analytics.com
-  - google.com
-  - googlecommerce.com
-  - *.googlecommerce.com
-  - ggpht.cn
-  - *.ggpht.cn
-  - urchin.com
-  - *.urchin.com
-  - youtu.be
-  - youtube.com
-  - *.youtube.com
-  - music.youtube.com
-  - *.music.youtube.com
-  - youtubeeducation.com
-  - *.youtubeeducation.com
-  - youtubekids.com
-  - *.youtubekids.com
-  - yt.be
-  - *.yt.be
-  - android.clients.google.com
-  - *.android.google.cn
-  - *.chrome.google.cn
-  - *.developers.google.cn
-  - *.aistudio.google.com
+[*] HTTP Security Headers Report for: https://www.vilartex.pt
 
-[+] Running SSL Labs Analysis...
-Grade             : B
-Poodle            : False
-Heartbleed        : False
-Heartbeat         : False
-FREAK             : False
-LOGJAM            : False
-DROWN             : None
+====================== Security Headers ====================
+[!] Missing header: Strict-Transport-Security
+[!] Missing header: Content-Security-Policy
+[!] Missing header: X-Frame-Options
+[!] Missing header: X-Content-Type-Options
+[!] Missing header: Referrer-Policy
+[!] Missing header: Permissions-Policy
 
-Supported Protocols:
-  - TLS 1.0: Disabled
-  - TLS 1.1: Disabled
-  - TLS 1.2: Disabled
-  - TLS 1.3: Disabled
+=================== Full Response Headers ==================
+Server: nginx
+Date: Wed, 28 May 2025 20:21:53 GMT
+Content-Type: text/html
+Transfer-Encoding: chunked
+Connection: keep-alive
+Vary: Accept-Encoding
+Content-Encoding: gzip
 
-Cipher Suites:
-# TLS 1.3 (server preference order)
-  (None)
-# TLS 1.2 (server preference order)
-   (0 bits)
-   (0 bits)
-   (0 bits)
-   (0 bits)
-# TLS 1.1 (server preference order)
-  (None)
-# TLS 1.0 (server preference order)
-  (None)
-
-Weak Ciphers: None found
-
-[*] Finished SSL check on google.com
+=================== Extra Interesting Info =================
+[!] HTTP does NOT redirect to HTTPS — consider enforcing HTTPS.
+[~] Server: nginx
 

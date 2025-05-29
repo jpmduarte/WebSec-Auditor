@@ -204,150 +204,6 @@ def run_ssl_check(target):
     report_lines = [f"[*] SSL Certificate Report for: {target}"]
 
     try:
-        # Clean input
-        host = target.replace('http://', '').replace('https://', '').split('/')[0]
-        port = 443
-
-        # IDNA support
-        server_hostname = idna.encode(host).decode()
-
-        # Set up socket and SSL context
-        context = ssl.create_default_context()
-        with socket.create_connection((host, port), timeout=5) as sock:
-            ip = sock.getpeername()[0]
-            with context.wrap_socket(sock, server_hostname=host) as ssock:
-                der_cert = ssock.getpeercert(binary_form=True)
-                cert = x509.load_der_x509_certificate(der_cert, default_backend())
-
-        # Certificate parsing
-        subject = cert.subject
-        issuer = cert.issuer
-        valid_from = cert.not_valid_before_utc
-        valid_to = cert.not_valid_after_utc
-        now = datetime.now(timezone.utc)
-        days_left = (valid_to - now).days
-        expired = now > valid_to
-
-        # Subject and issuer details
-        subject_cn = subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        subject_o = subject.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)[0].value \
-            if cert.subject.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME) else ''
-        issuer_cn = issuer.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        issuer_o = issuer.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)[0].value \
-            if issuer.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME) else ''
-
-        # SANs
-        try:
-            san_extension = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-            san_list = san_extension.value.get_values_for_type(x509.DNSName)
-        except x509.ExtensionNotFound:
-            san_list = []
-
-        # Report certificate info
-        report_lines.append(f"Issued to       : {subject_cn} ({subject_o})")
-        report_lines.append(f"Issued by       : {issuer_cn} ({issuer_o})")
-        report_lines.append(f"Server IP       : {ip}")
-        report_lines.append(f"Valid from      : {valid_from.strftime('%Y-%m-%d')}")
-        report_lines.append(f"Valid to        : {valid_to.strftime('%Y-%m-%d')} ({days_left} days left)")
-        report_lines.append(f"Expired         : {'Yes' if expired else 'No'}")
-        report_lines.append(f"Serial Number   : {cert.serial_number}")
-        report_lines.append(f"Signature Algo  : {cert.signature_hash_algorithm.name.upper()}")
-        report_lines.append("Subject Alt Names:")
-        for san in san_list:
-            report_lines.append(f"  - {san}")
-        if days_left <= 15:
-            report_lines.append("[!] Warning: Certificate will expire in less than 15 days.")
-
-        # SSL Labs Analysis
-        report_lines.append("\n[+] Running SSL Labs Analysis...")
-        api_url = 'https://api.ssllabs.com/api/v3/'
-
-        while True:
-            main_request = json.loads(urlopen(f"{api_url}analyze?host={host}&all=done").read().decode())
-            if main_request['status'] in ('DNS', 'IN_PROGRESS'):
-                sleep(5)
-                continue
-            elif main_request['status'] == 'READY':
-                break
-
-        endpoint = main_request['endpoints'][0]['ipAddress']
-        endpoint_data = json.loads(urlopen(f"{api_url}getEndpointData?host={host}&s={endpoint}&all=done").read().decode())
-        details = endpoint_data['details']
-
-        # Vulnerabilities
-        report_lines.append(f"Grade             : {main_request['endpoints'][0].get('grade')}")
-        report_lines.append(f"Poodle            : {details.get('poodle')}")
-        report_lines.append(f"Heartbleed        : {details.get('heartbleed')}")
-        report_lines.append(f"Heartbeat         : {details.get('heartbeat')}")
-        report_lines.append(f"FREAK             : {details.get('freak')}")
-        report_lines.append(f"LOGJAM            : {details.get('logjam')}")
-        report_lines.append(f"DROWN             : {details.get('drownVulnerable')}")
-
-        # Supported Protocols
-        protocols = details.get('protocols', [])
-        protocol_versions = { 'TLS 1.0': False, 'TLS 1.1': False, 'TLS 1.2': False, 'TLS 1.3': False }
-        for proto in protocols:
-            version = proto.get('version')
-            key = f"TLS {version}"
-            if key in protocol_versions:
-                protocol_versions[key] = True
-
-        report_lines.append("\nSupported Protocols:")
-        for proto, enabled in protocol_versions.items():
-            status = "Enabled" if enabled else "Disabled"
-            report_lines.append(f"  - {proto}: {status}")
-
-        # Cipher Suites grouped by protocol version
-        cipher_suites = details.get('suites', {}).get('list', [])
-
-        # Group ciphers by protocol version for output
-        ciphers_by_protocol = {
-            'TLS 1.3': [],
-            'TLS 1.2': [],
-            'TLS 1.1': [],
-            'TLS 1.0': [],
-        }
-
-        # List of weak cipher indicators (can expand as needed)
-        weak_indicators = ['RC4', 'DES', '3DES', 'NULL', 'EXPORT', 'WEAK', 'CBC']
-
-        def is_weak_cipher(name):
-            # Mark as weak if any weak indicator found in cipher name (case insensitive)
-            return any(ind in name.upper() for ind in weak_indicators)
-
-        for cipher in cipher_suites:
-            name = cipher.get('name', '')
-            protocol = cipher.get('protocol', '')
-            strength = cipher.get('cipherStrength', 0)
-            weak = is_weak_cipher(name)
-            weak_tag = " WEAK" if weak else ""
-            line = f"{name}{weak_tag} ({strength} bits)"
-            if protocol in ciphers_by_protocol:
-                ciphers_by_protocol[protocol].append(line)
-            else:
-                # If unknown protocol, put in TLS 1.2 by default
-                ciphers_by_protocol['TLS 1.2'].append(line)
-
-        report_lines.append("\nCipher Suites")
-        for proto in ['TLS 1.3', 'TLS 1.2', 'TLS 1.1', 'TLS 1.0']:
-            ciphers = ciphers_by_protocol.get(proto, [])
-            if ciphers:
-                report_lines.append(f"# {proto} (server-preferred order)")
-                for cipher in ciphers:
-                    report_lines.append(f"  {cipher}")
-
-    except Exception as e:
-        return f"[!] SSL check failed for {target}: {e}\n"
-
-    report_lines.append(f"\n[*] Finished SSL check on {target}")
-    return "\n".join(report_lines) + "\n"
-
-
-def run_ssl_check(target):
-    print(f"[*] Starting SSL check on {target}")
-    report_lines = [f"[*] SSL Certificate Report for: {target}"]
-
-    try:
         host = target.replace('http://', '').replace('https://', '').split('/')[0]
         port = 443
 
@@ -492,6 +348,88 @@ def run_ssl_check(target):
     report_lines.append(f"\n[*] Finished SSL check on {target}")
     return "\n".join(report_lines) + "\n"
 
+def run_headers_check(target):
+    print(f"[*] Starting headers check on {target}")
+    output_lines = [f"[*] HTTP Security Headers Report for: {target}"]
+
+    SECURITY_HEADERS = [
+        "strict-transport-security",
+        "content-security-policy",
+        "x-frame-options",
+        "x-content-type-options",
+        "referrer-policy",
+        "permissions-policy",
+    ]
+
+    INTERESTING_HEADERS = [
+        "x-powered-by",
+        "server",
+        "access-control-allow-origin",
+        "content-security-policy",
+    ]
+
+    http_to_https = False
+
+    try:
+        parsed = urlparse(target)
+        domain = parsed.netloc or parsed.path
+        https_url = f"https://{domain}"
+        http_url = f"http://{domain}"
+
+        try:
+            http_response = requests.get(http_url, allow_redirects=True, timeout=10)
+            if http_response.url.startswith("https://"):
+                http_to_https = True
+                output_lines.append(f"[!] Detected HTTP → HTTPS redirect: {http_url} → {http_response.url}")
+        except requests.exceptions.RequestException:
+            pass
+
+        response = requests.get(https_url, timeout=10)
+        headers = {k.lower(): v for k, v in response.headers.items()}  
+
+        output_lines.append("\n====================== Security Headers ====================")
+        for header in SECURITY_HEADERS:
+            if header in headers:
+                output_lines.append(f"[+] {header}: {headers[header]}")
+            else:
+                output_lines.append(f"[!] Missing header: {header}")
+
+        output_lines.append("\n=================== Full Response Headers ==================")
+        for k, v in headers.items():
+            output_lines.append(f"{k}: {v}")
+
+        output_lines.append("\n=================== Extra Interesting Info =================")
+        if http_to_https:
+            output_lines.append("[+] HTTP redirects to HTTPS — good security practice.")
+        else:
+            output_lines.append("[!] HTTP does NOT redirect to HTTPS — consider enforcing HTTPS.")
+
+        for header in INTERESTING_HEADERS:
+            if header in headers:
+                value = headers[header]
+                output_lines.append(f"[~] {header}: {value}")
+
+                if header == "content-security-policy":
+                    output_lines.append("    [•] Analyzing CSP...")
+                    if "'unsafe-inline'" in value:
+                        output_lines.append("    [!] CSP uses 'unsafe-inline' — allows inline scripts, not recommended.")
+                    if "'unsafe-eval'" in value:
+                        output_lines.append("    [!] CSP uses 'unsafe-eval' — allows eval(), dangerous for XSS.")
+                    if "*" in value:
+                        output_lines.append("    [!] CSP uses wildcards (*) — too permissive, restrict to trusted sources.")
+                    if "default-src" not in value:
+                        output_lines.append("    [!] CSP missing 'default-src' — fallback not defined.")
+                    if "script-src *" in value:
+                        output_lines.append("    [!] 'script-src *' allows scripts from anywhere — reduce scope.")
+
+                if header == "access-control-allow-origin" and value.strip() == "*":
+                    output_lines.append("    [!] Access-Control-Allow-Origin is set to '*' — vulnerable to data leaks in some cases.")
+
+    except requests.exceptions.RequestException as e:
+        output_lines.append(f"[!] Error fetching headers: {e}")
+
+    print(f"[*] Finished headers check on {target}")
+    return "\n".join(output_lines) + "\n"
 
 def run_dns_check(target):
     print(f"[*] Running DNS check on {target}")
@@ -506,7 +444,7 @@ def run_nmap_check(target, safe_mode=False):
         args = ['nmap', '-sS', '-p-', '-Pn', host]
     else:
         #args = ['nmap', '-sC', '-sV', host]
-        args = ['nmap',host]
+        args = ['nmap', host]
     try:
         result = subprocess.run(args, capture_output=True, text=True, check=True)
         output = result.stdout
@@ -604,10 +542,10 @@ def main():
         "cookies": lambda: run_cookies_check(args.target),
     }
 
-    threaded_checks = {"headers", "nmap", "cookies"}
+    threaded_checks = {"headers", "nmap", "cookies","ssl"}
     futures = {}
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         for check in checks_to_run:
             if check in threaded_checks:
                 futures[executor.submit(check_dispatch[check])] = check
