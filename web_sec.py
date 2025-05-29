@@ -5,6 +5,7 @@ import socket
 import ssl
 import json
 import os
+import time
 import re
 import idna
 import requests
@@ -145,6 +146,7 @@ def run_cookies_check(target, max_pages=20):
                 output_lines.append(f"    HttpOnly: {'Yes' if cookie.get('httpOnly') else 'No'}")
                 output_lines.append(f"    Secure:   {'Yes' if cookie.get('secure') else 'No'}")
                 output_lines.append(f"    SameSite: {cookie.get('sameSite', 'None')}")
+                output_lines.append("===========================")
                 total += 1
         output_lines.append(f"\nTotal unique cookies found: {total}")
         output_lines.append("========================================================")
@@ -205,22 +207,25 @@ Available checks:
     return args
 
 def run_ssl_check(target):
-    print(f"[*] Starting SSL check on {target}")
     report_lines = [f"[*] SSL Certificate Report for: {target}"]
 
     try:
+        # Extract hostname from URL
         host = target.replace('http://', '').replace('https://', '').split('/')[0]
         port = 443
 
+        # IDNA encode hostname for SNI support
         server_hostname = idna.encode(host).decode()
 
+        # Get certificate via SSL socket
         context = ssl.create_default_context()
         with socket.create_connection((host, port), timeout=5) as sock:
             ip = sock.getpeername()[0]
-            with context.wrap_socket(sock, server_hostname=host) as ssock:
+            with context.wrap_socket(sock, server_hostname=server_hostname) as ssock:
                 der_cert = ssock.getpeercert(binary_form=True)
                 cert = x509.load_der_x509_certificate(der_cert, default_backend())
 
+        # Parse cert details
         subject = cert.subject
         issuer = cert.issuer
         valid_from = cert.not_valid_before_utc
@@ -229,19 +234,28 @@ def run_ssl_check(target):
         days_left = (valid_to - now).days
         expired = now > valid_to
 
+        # Subject fields
         subject_cn = subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        subject_o = subject.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)[0].value \
-            if cert.subject.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME) else ''
-        issuer_cn = issuer.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        issuer_o = issuer.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)[0].value \
-            if issuer.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME) else ''
-
         try:
-            san_extension = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-            san_list = san_extension.value.get_values_for_type(x509.DNSName)
+            subject_o = subject.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)[0].value
+        except IndexError:
+            subject_o = ''
+
+        # Issuer fields
+        issuer_cn = issuer.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
+        try:
+            issuer_o = issuer.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)[0].value
+        except IndexError:
+            issuer_o = ''
+
+        # SANs
+        try:
+            san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            san_list = san_ext.value.get_values_for_type(x509.DNSName)
         except x509.ExtensionNotFound:
             san_list = []
 
+        # Certificate report
         report_lines.append(f"Issued to       : {subject_cn} ({subject_o})")
         report_lines.append(f"Issued by       : {issuer_cn} ({issuer_o})")
         report_lines.append(f"Server IP       : {ip}")
@@ -256,102 +270,120 @@ def run_ssl_check(target):
         if days_left <= 15:
             report_lines.append("[!] Warning: Certificate will expire in less than 15 days.")
 
-        report_lines.append("\n[+] Running SSL Labs Analysis...")
-        api_url = 'https://api.ssllabs.com/api/v3/'
+        # SSL Labs API URLs
+        api_url_base = 'https://api.ssllabs.com/api/v3/'
 
-        while True:
-            main_request = json.loads(urlopen(f"{api_url}analyze?host={host}&all=done").read().decode())
-            status = main_request['status']
+        # Run SSL Labs scan with retries & timeout
+        report_lines.append("\n[+] Running SSL Labs Analysis... (this can take a while)")
+
+        max_attempts = 20
+        attempt = 0
+        while attempt < max_attempts:
+            r = requests.get(f"{api_url_base}analyze", params={'host': host, 'all': 'done'}, timeout=10)
+            r.raise_for_status()
+            main_request = r.json()
+            status = main_request.get('status', '')
             if status in ('DNS', 'IN_PROGRESS'):
-                sleep(5)
+                time.sleep(5)
+                attempt += 1
                 continue
             elif status == 'READY':
                 break
             else:
-                raise Exception(f"Unexpected SSL Labs status: {status}")
+                raise RuntimeError(f"Unexpected SSL Labs status: {status}")
+        else:
+            raise TimeoutError("SSL Labs scan did not complete in time.")
 
-        endpoint = main_request['endpoints'][0]['ipAddress']
-        endpoint_data = json.loads(urlopen(f"{api_url}getEndpointData?host={host}&s={endpoint}&all=done").read().decode())
-        details = endpoint_data['details']
+        endpoint_ip = main_request['endpoints'][0]['ipAddress']
+        r2 = requests.get(f"{api_url_base}getEndpointData", params={'host': host, 's': endpoint_ip, 'all': 'done'}, timeout=10)
+        r2.raise_for_status()
+        endpoint_data = r2.json()
+        details = endpoint_data.get('details', {})
 
-        report_lines.append(f"Grade             : {main_request['endpoints'][0].get('grade')}")
-        report_lines.append(f"Poodle            : {details.get('poodle')}")
-        report_lines.append(f"Heartbleed        : {details.get('heartbleed')}")
-        report_lines.append(f"Heartbeat         : {details.get('heartbeat')}")
-        report_lines.append(f"FREAK             : {details.get('freak')}")
-        report_lines.append(f"LOGJAM            : {details.get('logjam')}")
-        report_lines.append(f"DROWN             : {details.get('drownVulnerable')}")
+        # Basic vulnerability report
+        report_lines.append(f"\nGrade             : {main_request['endpoints'][0].get('grade', 'N/A')}")
+        for vuln in ['poodle', 'heartbleed', 'heartbeat', 'freak', 'logjam', 'drownVulnerable']:
+            report_lines.append(f"{vuln.capitalize():<18}: {details.get(vuln, 'N/A')}")
 
+        # Protocols
         protocols_list = details.get('protocols', [])
-        protocol_supported = {'TLS 1.0': False, 'TLS 1.1': False, 'TLS 1.2': False, 'TLS 1.3': False}
-        for p in protocols_list:
-            name = p.get('name', '').upper()
-            if 'TLS 1.0' in name:
-                protocol_supported['TLS 1.0'] = True
-            elif 'TLS 1.1' in name:
-                protocol_supported['TLS 1.1'] = True
-            elif 'TLS 1.2' in name:
-                protocol_supported['TLS 1.2'] = True
-            elif 'TLS 1.3' in name:
-                protocol_supported['TLS 1.3'] = True
-
         report_lines.append("\nSupported Protocols:")
-        for proto, supported in protocol_supported.items():
-            report_lines.append(f"  - {proto}: {'Enabled' if supported else 'Disabled'}")
+        for proto in protocols_list:
+            name = proto.get('name', 'Unknown')
+            version = proto.get('version', '')
+            report_lines.append(f"  - {name} {version}".strip())
 
-        cipher_suites = details.get('suites', [])
+        # Protocol ID to name map
+        proto_id_to_name = {p.get('id'): f"{p.get('name')} {p.get('version')}".strip() for p in protocols_list}
 
-        ciphers_by_protocol = {
-            'TLS 1.3': [],
-            'TLS 1.2': [],
-            'TLS 1.1': [],
-            'TLS 1.0': [],
+        # Cipher suites
+        suites = details.get('suites', [])
+        report_lines.append("\nCipher Suites by Protocol:")
+
+        # Full list of weak TLS 1.2 ciphers from your earlier data
+        weak_tls12_ciphers = {
+            "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384",
+            "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+            "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+            "TLS_ECDHE_RSA_WITH_CAMELLIA_256_CBC_SHA384",
+            "TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256",
+            "TLS_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_RSA_WITH_AES_256_GCM_SHA384",
+            "TLS_RSA_WITH_AES_128_CBC_SHA256",
+            "TLS_RSA_WITH_AES_256_CBC_SHA256",
+            "TLS_RSA_WITH_AES_128_CBC_SHA",
+            "TLS_RSA_WITH_AES_256_CBC_SHA",
+            "TLS_RSA_WITH_AES_256_CCM_8",
+            "TLS_RSA_WITH_AES_256_CCM",
+            "TLS_RSA_WITH_ARIA_256_GCM_SHA384",
+            "TLS_RSA_WITH_AES_128_CCM_8",
+            "TLS_RSA_WITH_AES_128_CCM",
+            "TLS_RSA_WITH_ARIA_128_GCM_SHA256",
+            "TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256",
+            "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA256",
+            "TLS_RSA_WITH_CAMELLIA_256_CBC_SHA",
+            "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA"
         }
 
-        weak_indicators = ['RC4', 'DES', '3DES', 'NULL', 'EXPORT', 'WEAK', 'CBC']
+        ciphers_by_protocol = {}
+        weak_ciphers_found = []
 
-        def is_weak_cipher(name):
-            return any(ind in name.upper() for ind in weak_indicators)
+        for proto_suite in suites:
+            proto_id = proto_suite.get('protocol')
+            proto_name = proto_id_to_name.get(proto_id, f"Unknown protocol ({proto_id})")
+            ciphers_by_protocol.setdefault(proto_name, [])
 
-        for cipher in cipher_suites:
-            name = cipher.get('name', '')
-            protocol = cipher.get('protocol', '')
-            strength = cipher.get('cipherStrength', 0)
-            weak = is_weak_cipher(name)
-            weak_tag = " WEAK" if weak else ""
-            line = f"{name}{weak_tag} ({strength} bits)"
-            if protocol in ciphers_by_protocol:
-                ciphers_by_protocol[protocol].append(line)
-            else:
-                ciphers_by_protocol['TLS 1.2'].append(line)
+            for cipher in proto_suite.get('list', []):
+                cipher_name = cipher.get('name', 'Unknown')
+                strength = cipher.get('cipherStrength', 0)
+                is_weak = (cipher_name in weak_tls12_ciphers) or any(x in cipher_name.upper() for x in ['RC4', 'DES', '3DES', 'NULL', 'EXPORT', 'WEAK', 'CBC'])
+                weak_tag = " WEAK" if is_weak else ""
+                ciphers_by_protocol[proto_name].append(f"{cipher_name}{weak_tag} ({strength} bits)")
+                if is_weak:
+                    weak_ciphers_found.append(f"{proto_name}: {cipher_name} ({strength} bits)")
 
-        report_lines.append("\nCipher Suites:")
-        for proto in ['TLS 1.3', 'TLS 1.2', 'TLS 1.1', 'TLS 1.0']:
-            report_lines.append(f"# {proto} (server preference order)")
-            if ciphers_by_protocol[proto]:
-                for c in ciphers_by_protocol[proto]:
-                    report_lines.append(f"  {c}")
+        for proto, ciphers in ciphers_by_protocol.items():
+            report_lines.append(f"# {proto}")
+            if ciphers:
+                for c in ciphers:
+                    report_lines.append(f"  - {c}")
             else:
                 report_lines.append("  (None)")
 
-        weak_ciphers = []
-        for proto, ciphers in ciphers_by_protocol.items():
-            for cipher_str in ciphers:
-                if "WEAK" in cipher_str:
-                    weak_ciphers.append(f"{proto}: {cipher_str}")
-
-        if weak_ciphers:
-            report_lines.append("\nWeak Ciphers:")
-            for w in weak_ciphers:
-                report_lines.append(f"  - {w}")
+        if weak_ciphers_found:
+            report_lines.append("\n[!] Weak Ciphers Found:")
+            for wc in weak_ciphers_found:
+                report_lines.append(f"  - {wc}")
         else:
-            report_lines.append("\nWeak Ciphers: None found")
+            report_lines.append("\n[+] No weak ciphers detected.")
 
     except Exception as e:
         return f"[!] SSL check failed for {target}: {e}\n"
 
     report_lines.append(f"\n[*] Finished SSL check on {target}")
     return "\n".join(report_lines) + "\n"
+
 
 def run_headers_check(target):
     print(f"[*] Starting headers check on {target}")
@@ -644,13 +676,20 @@ def main():
         "cookies": lambda: run_cookies_check(args.target),
         "waf": lambda: run_waf_check(args.target)
     }
+  
 
-    threaded_checks = {"headers", "nmap", "cookies","ssl", "dns","waf"}
+    # Define categories
+    threaded_checks = {"headers", "cookies", "ssl", "dns"}
+    subprocess_checks = {"nmap", "waf"}
+
+    outputs = []
+
+    # Run lightweight threadable checks first
     futures = {}
-    max_threads = min(32, os.cpu_count() * 5)
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+    print("[*] Starting I/O-bound checks in parallel...")
+    with ThreadPoolExecutor(max_workers=6) as executor:
         for check in checks_to_run:
-            if check in threaded_checks:
+            if check in threaded_checks and check in check_dispatch:
                 futures[executor.submit(check_dispatch[check])] = check
 
         for future in as_completed(futures):
@@ -664,14 +703,24 @@ def main():
             except Exception as e:
                 outputs.append(f"[!] Error during {check} check: {e}")
 
-    # Run non-threaded checks serially
-    for check in checks_to_run:
-        if check not in threaded_checks and check in check_dispatch:
+    # Run subprocess-heavy checks (wafw00f, nmap) with small thread pool
+    futures = {}
+    print("[*] Starting subprocess-heavy checks...")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        for check in checks_to_run:
+            if check in subprocess_checks and check in check_dispatch:
+                futures[executor.submit(check_dispatch[check])] = check
+
+        for future in as_completed(futures):
+            check = futures[future]
             outputs.append("=" * 60)
             outputs.append(f"{check.upper()} CHECK")
             outputs.append("=" * 60)
-            result = check_dispatch[check]()
-            outputs.append(result)
+            try:
+                result = future.result()
+                outputs.append(result)
+            except Exception as e:
+                outputs.append(f"[!] Error during {check} check: {e}")
 
     report = "\n".join(outputs) + "\n"
 

@@ -55,7 +55,7 @@ This module performs DNS reconnaissance for a target domain.
 ---
 
 ## 📦 Installation
-
+before cloning make sure you have google-chrome or firefox installed due to cookie web crawling 
 ```bash
 git clone https://github.com/yourname/websec-auditor.git
 cd websec-auditor
