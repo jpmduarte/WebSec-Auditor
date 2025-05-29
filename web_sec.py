@@ -4,6 +4,7 @@ import subprocess
 import socket
 import ssl
 import json
+import os
 import re
 import idna
 import requests
@@ -28,7 +29,7 @@ import dns.query
 import dns.zone
 
 
-ALLOWED_CHECKS = {"ssl", "headers", "dns", "nmap", "cookies"}
+ALLOWED_CHECKS = {"ssl", "headers", "dns", "nmap", "cookies", "waf"}
 
 def enforce_scheme(url, default_scheme="https"):
     if not url.startswith("http"):
@@ -176,6 +177,7 @@ Available checks:
   dns      - Perform DNS-related checks
   nmap     - Run basic Nmap port scan
   cookies  - Inspect HTTP cookies
+  waf      - Fingerprints WAF's
         """
     )
     
@@ -351,7 +353,6 @@ def run_ssl_check(target):
     report_lines.append(f"\n[*] Finished SSL check on {target}")
     return "\n".join(report_lines) + "\n"
 
-
 def run_headers_check(target):
     print(f"[*] Starting headers check on {target}")
     output_lines = [f"[*] HTTP Security Headers Report for: {target}"]
@@ -447,7 +448,7 @@ def run_dns_check(target):
     if host.startswith("www."):
         host = host[4:]
 
-    print(f"[*] Running DNS check on {host}")
+    print(f"[*] Starting DNS check on {host}")
     output_lines = [f"[*] DNS Information Report for: {host}"]
 
     RECORD_TYPES = ["A", "AAAA", "MX", "NS", "TXT", "SOA", "CNAME"]
@@ -598,6 +599,34 @@ def run_nmap_check(target, safe_mode=False):
     print(f"[*] Finished cookie check on {host}")
     return "\n".join(output_lines)
 
+def run_waf_check(target):
+    print(f"[*] Starting WAF check on {target}")
+    output_lines = [f"[*] WAF Detection Report for: {target}"]
+
+    try:
+        result = subprocess.run(
+            ["wafw00f", target],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        if result.returncode == 0 and result.stdout:
+            for line in result.stdout.strip().splitlines():
+                if "is behind" in line:
+                    output_lines.append(f"[+] {line}")
+                elif "No WAF detected" in line:
+                    output_lines.append("[!] No WAF detected.")
+        else:
+            output_lines.append("[!] No output or WAF scan failed.")
+
+    except subprocess.TimeoutExpired:
+        output_lines.append("[!] WAF check timed out.")
+    except Exception as e:
+        output_lines.append(f"[!] Error running wafw00f: {e}")
+
+    print(f"[*] Finished WAF check on {target}")
+    return "\n".join(output_lines) + "\n"
 
 def main():
     args = parse_arguments()
@@ -613,12 +642,13 @@ def main():
         "dns": lambda: run_dns_check(args.target),
         "nmap": lambda: run_nmap_check(args.target, safe_mode=args.safe_mode),
         "cookies": lambda: run_cookies_check(args.target),
+        "waf": lambda: run_waf_check(args.target)
     }
 
-    threaded_checks = {"headers", "nmap", "cookies","ssl", "dns"}
+    threaded_checks = {"headers", "nmap", "cookies","ssl", "dns","waf"}
     futures = {}
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    max_threads = min(32, os.cpu_count() * 5)
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
         for check in checks_to_run:
             if check in threaded_checks:
                 futures[executor.submit(check_dispatch[check])] = check
@@ -649,7 +679,6 @@ def main():
         f.write(report)
 
     print("Scan complete. Results saved to scan_report.txt")
-
 
 if __name__ == "__main__":
     main()
