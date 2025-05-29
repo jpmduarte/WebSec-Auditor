@@ -14,7 +14,6 @@ from urllib.parse import urljoin, urlparse
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
-from OpenSSL import SSL
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -23,6 +22,10 @@ from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import dns.resolver
+import dns.query
+import dns.zone
 
 
 ALLOWED_CHECKS = {"ssl", "headers", "dns", "nmap", "cookies"}
@@ -348,6 +351,7 @@ def run_ssl_check(target):
     report_lines.append(f"\n[*] Finished SSL check on {target}")
     return "\n".join(report_lines) + "\n"
 
+
 def run_headers_check(target):
     print(f"[*] Starting headers check on {target}")
     output_lines = [f"[*] HTTP Security Headers Report for: {target}"]
@@ -373,18 +377,23 @@ def run_headers_check(target):
     try:
         parsed = urlparse(target)
         domain = parsed.netloc or parsed.path
+
         https_url = f"https://{domain}"
         http_url = f"http://{domain}"
 
+        # Try HTTP → HTTPS redirect detection
         try:
-            http_response = requests.get(http_url, allow_redirects=True, timeout=10)
+            http_response = requests.get(http_url, allow_redirects=True, timeout=10, headers={"User-Agent": "curl/7.68.0"})
             if http_response.url.startswith("https://"):
                 http_to_https = True
                 output_lines.append(f"[!] Detected HTTP → HTTPS redirect: {http_url} → {http_response.url}")
-        except requests.exceptions.RequestException:
-            pass
+        except requests.exceptions.RequestException as e:
+            output_lines.append(f"[!] HTTP redirect test failed: {e}")
 
-        response = requests.get(https_url, timeout=10)
+        # Main HTTPS request
+        response = requests.get(https_url, timeout=10, headers={"User-Agent": "curl/7.68.0"})
+        output_lines.append(f"[*] Fetched URL: {response.url} (status: {response.status_code})")
+
         headers = {k.lower(): v for k, v in response.headers.items()}  
 
         output_lines.append("\n====================== Security Headers ====================")
@@ -432,7 +441,71 @@ def run_headers_check(target):
     return "\n".join(output_lines) + "\n"
 
 def run_dns_check(target):
-    print(f"[*] Running DNS check on {target}")
+    # Clean and normalize the domain: strip scheme and www.
+    parsed = urlparse(target)
+    host = parsed.netloc or parsed.path
+    if host.startswith("www."):
+        host = host[4:]
+
+    print(f"[*] Running DNS check on {host}")
+    output_lines = [f"[*] DNS Information Report for: {host}"]
+
+    RECORD_TYPES = ["A", "AAAA", "MX", "NS", "TXT", "SOA", "CNAME"]
+
+    output_lines.append("\n==================== DNS Records ====================")
+    for record_type in RECORD_TYPES:
+        try:
+            answers = dns.resolver.resolve(host, record_type, raise_on_no_answer=False)
+            if answers:
+                for rdata in answers:
+                    output_lines.append(f"[+] {record_type}: {rdata.to_text()}")
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.exception.Timeout) as e:
+            output_lines.append(f"[!] {record_type} lookup failed: {e}")
+
+    # Zone transfer testing
+    try:
+        ns_records = dns.resolver.resolve(host, "NS")
+        output_lines.append("\n==================== Zone Transfer Test ====================")
+        for ns in ns_records:
+            ns_host = str(ns.target).rstrip(".")
+            output_lines.append(f"[*] Attempting zone transfer from NS: {ns_host}")
+            try:
+                zone = dns.zone.from_xfr(dns.query.xfr(ns_host, host, timeout=5))
+                for name, node in zone.nodes.items():
+                    rdatasets = node.rdatasets
+                    for rdataset in rdatasets:
+                        output_lines.append(f"[+] Zone Transfer Record: {name}.{host} {rdataset}")
+            except Exception as e:
+                output_lines.append(f"[!] Zone transfer from {ns_host} failed: {e}")
+    except Exception as e:
+        output_lines.append(f"[!] Could not retrieve NS records: {e}")
+
+    # DMARC, SPF, DKIM from TXT
+    output_lines.append("\n================ DMARC / SPF / DKIM =================")
+    try:
+        txt_records = dns.resolver.resolve(host, "TXT")
+        for rdata in txt_records:
+            # decode bytes to string before joining
+            txt = ''.join(s.decode('utf-8') for s in rdata.strings)
+            if txt.startswith("v=spf1"):
+                output_lines.append(f"[+] SPF Record: {txt}")
+            if "dkim" in txt.lower():
+                output_lines.append(f"[~] Possible DKIM TXT Record: {txt}")
+    except Exception as e:
+        output_lines.append(f"[!] TXT record fetch failed: {e}")
+
+    # DMARC check (_dmarc subdomain)
+    try:
+        dmarc_domain = f"_dmarc.{host}"
+        dmarc_records = dns.resolver.resolve(dmarc_domain, "TXT")
+        for rdata in dmarc_records:
+            txt = ''.join(s.decode('utf-8') for s in rdata.strings)
+            output_lines.append(f"[+] DMARC Record: {txt}")
+    except Exception as e:
+        output_lines.append(f"[!] DMARC record fetch failed: {e}")
+
+    print(f"[*] Finished DNS check on {host}")
+    return "\n".join(output_lines) + "\n"
 
 def run_nmap_check(target, safe_mode=False):
     parsed = urlparse(target)
@@ -542,7 +615,7 @@ def main():
         "cookies": lambda: run_cookies_check(args.target),
     }
 
-    threaded_checks = {"headers", "nmap", "cookies","ssl"}
+    threaded_checks = {"headers", "nmap", "cookies","ssl", "dns"}
     futures = {}
 
     with ThreadPoolExecutor(max_workers=4) as executor:
